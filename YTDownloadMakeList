@@ -1,0 +1,52 @@
+import os
+import sys
+import shutil
+import subprocess
+import numpy as np
+from PIL import Image
+
+video_url = "https://www.youtube.com/watch?v=Ew7N65F6oYc"
+
+if video_url is not None:
+    subprocess.run(["youtube-dl", video_url])
+
+# Get the file name of the downloaded video
+video_filename = None
+for file in os.listdir(os.getcwd()):
+    if file.endswith(".mp4") or file.endswith(".mkv"):
+        video_filename = file
+        break
+
+# Make sure a video file was found
+if video_filename is None:
+    raise ValueError("No video file found in the current directory")
+
+# Create 'frames' folder and extract frames
+if not os.path.exists("frames"):
+    os.makedirs("frames")
+
+subprocess.run(["ffmpeg", "-i", video_filename, "frames/frame%d.png"])
+
+
+# Creates np array from frames
+
+# Get the number of frames and image size from the 'frames' folder
+num_frames = len(os.listdir("frames"))
+first_frame = Image.open(f"frames/frame1.png")
+width, height = first_frame.size
+pixel_values = np.empty((height, width, 3, num_frames), dtype=np.uint8)
+
+# Iterate over the frame files
+for i in range(num_frames):
+    if (i%20 == 0):
+        sys.stdout.write(f"\rBuilding Array: {i/(num_frames-1):.2f}%")
+    # Load the image file and store
+    image = np.array(Image.open(f"frames/frame{i+1}.png"))
+    pixel_values[:,:,:,i] = image
+
+sys.stdout.write(f"\rBuilding Array: 100.00%")
+np.save("pixel_values.npy", pixel_values)
+
+# Clean up folders and video
+shutil.rmtree("frames")
+os.remove(video_filename)
