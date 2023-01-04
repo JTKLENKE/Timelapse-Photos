@@ -1,0 +1,113 @@
+import sys
+import time
+import numpy as np
+from PIL import Image
+from multiprocessing import Pool, shared_memory
+
+# Hyperparameters, first and last index of good frames, function for convolution
+start = 57
+stop = 687
+
+standard_deviation = 12
+function_domain = 64
+dx = 1
+f = lambda x: 1/(standard_deviation*np.sqrt(2*np.pi))*np.exp(-(x**2)/(2*standard_deviation**2))
+
+def convolve(pixel_data, function_values, dx, time):
+    pixel_values = []
+    i = 0
+    # Move outward from time with step size dx until lengths match
+    while len(pixel_values) < len(function_values):
+        pixel_values.append(pixel_data[:, clamp(len(pixel_data[0]), round(time+i*dx))])
+        
+        if (len(pixel_values) != len(function_values)):
+            pixel_values.append(pixel_data[:, clamp(len(pixel_data[0]), round(time-i*dx))])
+
+        i += 1
+
+    # Calculate aproximate convolution at t = time
+    return [int(value) for value in np.round(function_values@pixel_values*dx)]
+
+def clamp(length, value):
+    # Contrain value to array length by reflecting index at end points
+    if (value >= length):
+        return length-1-(value-length)
+    return np.abs(value)
+
+def process_pixel(xy):
+    # Calculate t value
+    x, y = xy
+    t = scale*np.sqrt(((x-width/2)**2+(y-height/2)**2))
+    t = max(start, min(stop,stop-t))
+
+    # Get shared memory location
+    existing_shared_memory = shared_memory.SharedMemory(name="image_data")
+    get_image_data = np.ndarray((height, width, 3), dtype=np.int8, buffer=existing_shared_memory.buf)
+
+    # Put calculated values in array
+    pixels = pixel_values[y, x]
+    get_image_data[y, x, :] = convolve(pixels[:, start:stop+1], function_precompute, dx, t)
+
+def precompute_function(xi):
+    x, i = xi
+    
+    # Get shared memory location, put function value in index
+    existing_shared_memory = shared_memory.SharedMemory(name="precompute")
+    get_precompute = np.ndarray(x_values.shape, dtype="float32", buffer=existing_shared_memory.buf)
+    get_precompute[i] = f(x)
+
+def format_time(time_in_seconds):
+    if time_in_seconds < 60:
+        return f"{int(time_in_seconds%60)}"
+    if time_in_seconds < 3600:
+        return f"{int(time_in_seconds//60)}:{int(time_in_seconds%60):02}"
+    return f"{int(time_in_seconds//3600)}:{int((time_in_seconds%3600)//60):02}:{int(time_in_seconds%60):02}"
+
+# Precompute distribution for convolution
+x_values = np.arange(-function_domain/2, function_domain/2, dx)
+
+function_precompute = np.zeros(x_values.shape, dtype="float32")
+precompute_shared_memory = shared_memory.SharedMemory(name="precompute", create=True, size=function_precompute.nbytes)
+
+shared_memory_function_precompute = np.ndarray(function_precompute.shape, dtype="float32", buffer=precompute_shared_memory.buf)
+shared_memory_function_precompute[:] = function_precompute[:]
+
+with Pool() as pool:
+    for _ in pool.imap_unordered(precompute_function, [(x, i) for i, x in enumerate(x_values)]):
+        pass
+function_precompute[:] = shared_memory_function_precompute[:]
+precompute_shared_memory.close()
+precompute_shared_memory.unlink()
+
+# Load precomputed pixel data
+sys.stdout.write("\rLoading Image Data...")
+pixel_values  = np.load("pixel_values.npy")
+height, width, *_ = pixel_values.shape
+num_images = stop-start
+scale = num_images/np.sqrt((width/2)**2+(height/2)**2)
+
+image_data = np.zeros((height, width, 3), dtype=np.int8)
+image_shared_memory = shared_memory.SharedMemory(name="image_data", create=True, size=image_data.nbytes)
+
+shared_memory_image_data = np.ndarray(image_data.shape, dtype=np.int8, buffer=image_shared_memory.buf)
+shared_memory_image_data[:] = image_data[:]
+
+# Process each pixel and store it in sharedMemoryImageData
+start_time = time.perf_counter()
+with Pool() as pool:
+    for i, _ in enumerate(pool.imap_unordered(process_pixel, [(x, y) for x in range(width) for y in range(height)]), start=1):
+        if (i%1000 == 0):
+            percent_done = i*100/(width*height)
+            building_image = f"Building Image: {percent_done:.2f}%"
+            estimated_time = format_time((time.perf_counter()-start_time)*((100-percent_done)/percent_done))
+            estimated_time_string = f"Estimated Time Remaining: {estimated_time:<16}"
+            sys.stdout.write(f"\r{building_image}\t{estimated_time_string}")
+
+# Clean up
+sys.stdout.write(f"\rBuilding Image: 100.00%\tEstimated Time Remaining: 0\n")
+time_lapse_image = Image.fromarray(shared_memory_image_data, mode="RGB")
+image_shared_memory.close()
+image_shared_memory.unlink()
+
+# Save the new imag to a file
+time_lapse_image.save("timelapse.jpg")
